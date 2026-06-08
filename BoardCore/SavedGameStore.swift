@@ -56,6 +56,8 @@ struct SavedGameSnapshot: Codable {
     var playerBossFightCounts: [String: Int] = [:]
     /// Postęp Ścieżki Mocy (klucz = UUID gracza).
     var playerPowerPathProgress: [String: PlayerPowerPathProgress] = [:]
+    /// Zużycie zdolności w bieżącym okrążeniu (klucz = UUID gracza).
+    var playerLapAbilityUsage: [String: PlayerLapAbilityUsage] = [:]
 
     func stats(for playerID: UUID) -> PlayerRuntimeStats? {
         playerStats[playerID.uuidString]

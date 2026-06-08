@@ -297,7 +297,7 @@ a {
   -webkit-mask-composite: xor;
   mask-composite: exclude;
   pointer-events: none;
-  animation: border-shine-spin 190s linear infinite;
+  animation: border-shine-spin 95s linear infinite;
 }
 
 @keyframes border-shine-spin {

@@ -107,18 +107,31 @@ struct PowerPathTests {
         #expect(progress[id]?.experiencePoints == 20)
     }
 
+    @Test func lapUsageResetsAndPreventsStacking() {
+        var usage: [UUID: PlayerLapAbilityUsage] = [:]
+        let id = UUID()
+
+        #expect(LapAbilityUsageEngine.markUsedPowerPath(.darkAura, playerID: id, usage: &usage))
+        #expect(LapAbilityUsageEngine.hasUsedPowerPath(.darkAura, playerID: id, in: usage))
+        #expect(!LapAbilityUsageEngine.markUsedPowerPath(.darkAura, playerID: id, usage: &usage))
+
+        LapAbilityUsageEngine.resetLap(for: id, usage: &usage)
+        #expect(!LapAbilityUsageEngine.hasUsedPowerPath(.darkAura, playerID: id, in: usage))
+    }
+
     @Test func curseHalvesNextReward() {
         var progress: [UUID: PlayerPowerPathProgress] = [:]
-        let id = UUID()
-        progress[id] = PlayerPowerPathProgress(cursedPlayerIDs: [id])
+        let casterID = UUID()
+        let victimID = UUID()
+        progress[casterID] = PlayerPowerPathProgress(cursedPlayerIDs: [victimID])
 
         let (coins, message) = PowerPathEngine.applyRewardMultiplier(
-            playerID: id,
+            playerID: victimID,
             baseCoins: 200,
             progress: &progress
         )
         #expect(coins == 100)
         #expect(message != nil)
-        #expect(progress[id]?.cursedPlayerIDs.contains(id) == false)
+        #expect(progress[casterID]?.cursedPlayerIDs.contains(victimID) == false)
     }
 }

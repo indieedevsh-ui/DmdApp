@@ -421,9 +421,12 @@ struct GameInProgressView: View {
     @State private var showPlayerItemsOverlay = false
     @State private var showPlayerStatsOverlay = false
     @State private var showSessionAbilitiesOverlay = false
+    @State private var showYourSkillsOverlay = false
+    @State private var powerPathSkillUsePresentation: PowerPathSkillUsePresentation?
     @State private var specialCardDrawRevealed = false
     @State private var artifactDrawRevealed = false
     @State private var playerPowerPathProgress: [UUID: PlayerPowerPathProgress] = [:]
+    @State private var playerLapAbilityUsage: [UUID: PlayerLapAbilityUsage] = [:]
     @State private var powerPathPresentation: PowerPathPresentation?
     @State private var powerPathPendingAction: PowerPathPendingAction = .none
     @State private var pendingHealingPlayerID: UUID?
@@ -672,6 +675,9 @@ struct GameInProgressView: View {
             _playerPowerPathProgress = State(
                 initialValue: Self.powerPathProgressMap(from: snapshot.playerPowerPathProgress)
             )
+            _playerLapAbilityUsage = State(
+                initialValue: Self.lapAbilityUsageMap(from: snapshot.playerLapAbilityUsage)
+            )
             _playerSceneIndices = State(
                 initialValue: Self.playerSceneIndexMap(
                     from: snapshot.playerSceneIndices,
@@ -764,6 +770,16 @@ struct GameInProgressView: View {
 
     private static func powerPathProgressMap(from stored: [String: PlayerPowerPathProgress]) -> [UUID: PlayerPowerPathProgress] {
         var result: [UUID: PlayerPowerPathProgress] = [:]
+        for (key, value) in stored {
+            if let id = UUID(uuidString: key) {
+                result[id] = value
+            }
+        }
+        return result
+    }
+
+    private static func lapAbilityUsageMap(from stored: [String: PlayerLapAbilityUsage]) -> [UUID: PlayerLapAbilityUsage] {
+        var result: [UUID: PlayerLapAbilityUsage] = [:]
         for (key, value) in stored {
             if let id = UUID(uuidString: key) {
                 result[id] = value
@@ -974,6 +990,9 @@ struct GameInProgressView: View {
         if showSessionAbilitiesOverlay {
             return [.abilitiesExit]
         }
+        if showYourSkillsOverlay {
+            return [.abilitiesExit]
+        }
         if showPlayerItemsOverlay {
             return equipmentTrikiButtons
         }
@@ -1080,6 +1099,7 @@ struct GameInProgressView: View {
             String(showPlayerItemsOverlay),
             String(showPlayerStatsOverlay),
             String(showSessionAbilitiesOverlay),
+            String(showYourSkillsOverlay),
             String(isPowerPathOverlayVisible),
             powerPathTrikiCatalog.map(\.id).joined(separator: ","),
             String(bossVictoryPresentation != nil),
@@ -1185,6 +1205,9 @@ struct GameInProgressView: View {
             || !fallenPlayerQueue.isEmpty
             || bossVictoryPresentation != nil
             || isPowerPathOverlayVisible
+            || showSessionAbilitiesOverlay
+            || showYourSkillsOverlay
+            || powerPathSkillUsePresentation != nil
     }
 
     private func ownedItemIDs(for playerID: UUID) -> [UUID] {
@@ -1388,8 +1411,50 @@ struct GameInProgressView: View {
         financesAnimation: FinancesAnimationPolicy = .automatic
     ) {
         guard delta != 0, var stats = playerStats[playerID] else { return }
-        stats.finances = max(0, stats.finances + delta)
+        var actualDelta = delta
+        if delta > 0 {
+            let (adjusted, curseMessage) = PowerPathEngine.applyRewardMultiplier(
+                playerID: playerID,
+                baseCoins: delta,
+                progress: &playerPowerPathProgress
+            )
+            actualDelta = adjusted
+            if let curseMessage, let player = players.first(where: { $0.id == playerID }) {
+                turnState.logCustomEvent(playerName: player.className, message: curseMessage)
+            }
+        }
+        stats.finances = max(0, stats.finances + actualDelta)
         setPlayerStats(stats, for: playerID, financesAnimation: financesAnimation)
+    }
+
+    @discardableResult
+    private func applyCursedCoinGain(
+        _ amount: Int,
+        to playerID: UUID,
+        stats: inout PlayerRuntimeStats
+    ) -> String? {
+        guard amount > 0 else { return nil }
+        let (adjusted, curseMessage) = PowerPathEngine.applyRewardMultiplier(
+            playerID: playerID,
+            baseCoins: amount,
+            progress: &playerPowerPathProgress
+        )
+        stats.finances = min(9999, stats.finances + adjusted)
+        if let curseMessage, let player = players.first(where: { $0.id == playerID }) {
+            turnState.logCustomEvent(playerName: player.className, message: curseMessage)
+        }
+        return curseMessage
+    }
+
+    private func reconcileCoinGainWithCurse(
+        playerID: UUID,
+        beforeFinances: Int,
+        stats: inout PlayerRuntimeStats
+    ) {
+        let gain = stats.finances - beforeFinances
+        guard gain > 0 else { return }
+        stats.finances = beforeFinances
+        _ = applyCursedCoinGain(gain, to: playerID, stats: &stats)
     }
 
     private func setPlayerStats(
@@ -1817,6 +1882,14 @@ struct GameInProgressView: View {
             .fullScreenCover(isPresented: $showSessionAbilitiesOverlay) {
                 sessionAbilitiesOverlayContent
             }
+            .fullScreenCover(isPresented: $showYourSkillsOverlay) {
+                yourSkillsOverlayContent
+            }
+            .fullScreenCover(item: $powerPathSkillUsePresentation) { presentation in
+                PowerPathSkillUseSequenceOverlay(presentation: presentation) {
+                    powerPathSkillUsePresentation = nil
+                }
+            }
             .fullScreenCover(isPresented: $showPlayerItemsOverlay) {
                 if let activePlayer {
                     PlayerItemsFullScreenView(
@@ -1881,10 +1954,39 @@ struct GameInProgressView: View {
                         ability: ability,
                         casterID: activePlayer.id
                     )
+                    syncGameplayQRScanningState()
                 },
                 onExit: {
                     settings.playTapSound()
                     showSessionAbilitiesOverlay = false
+                    syncGameplayQRScanningState()
+                },
+                trikiExitHighlighted: selectedTrikiButton == .abilitiesExit,
+                trikiHoldChargeProgress: trikiHoldChargeProgress
+            )
+        }
+    }
+
+    @ViewBuilder
+    private var yourSkillsOverlayContent: some View {
+        if let activePlayer {
+            YourSkillsFullScreenView(
+                player: activePlayer,
+                playerGlow: turnGlowColor,
+                powerPathProgress: playerPowerPathProgress[activePlayer.id] ?? PlayerPowerPathProgress(),
+                lapUsage: playerLapAbilityUsage[activePlayer.id] ?? PlayerLapAbilityUsage(),
+                currentHealth: playerStats[activePlayer.id]?.health ?? 100,
+                opponents: players.filter { $0.id != activePlayer.id },
+                onUsePowerPathSkill: { skill in
+                    presentPowerPathSkillUse(skill, playerID: activePlayer.id)
+                },
+                onCurseTarget: { targetID in
+                    presentPowerPathCurseUse(casterID: activePlayer.id, targetID: targetID)
+                },
+                onExit: {
+                    settings.playTapSound()
+                    showYourSkillsOverlay = false
+                    syncGameplayQRScanningState()
                 },
                 trikiExitHighlighted: selectedTrikiButton == .abilitiesExit,
                 trikiHoldChargeProgress: trikiHoldChargeProgress
@@ -1914,6 +2016,9 @@ struct GameInProgressView: View {
                 reconcileTrikiSelection(resetToFirst: true)
             }
             .onChange(of: showSessionAbilitiesOverlay) { _, _ in
+                reconcileTrikiSelection(resetToFirst: true)
+            }
+            .onChange(of: showYourSkillsOverlay) { _, _ in
                 reconcileTrikiSelection(resetToFirst: true)
             }
             .onChange(of: showPlayerItemsOverlay) { _, _ in
@@ -2621,8 +2726,14 @@ struct GameInProgressView: View {
         let xpTransfer = outcome.xpTransfer
 
         if transfer > 0 {
+            let winnerFinancesBefore = winnerStats.finances
             loserStats.finances = max(0, loserStats.finances - transfer)
             winnerStats.finances += transfer
+            reconcileCoinGainWithCurse(
+                playerID: outcome.winnerID,
+                beforeFinances: winnerFinancesBefore,
+                stats: &winnerStats
+            )
             setPlayerStats(loserStats, for: outcome.loserID, financesAnimation: .suppressed)
             setPlayerStats(winnerStats, for: outcome.winnerID, financesAnimation: .suppressed)
 
@@ -2899,6 +3010,9 @@ struct GameInProgressView: View {
             ),
             playerPowerPathProgress: Dictionary(
                 uniqueKeysWithValues: playerPowerPathProgress.map { ($0.key.uuidString, $0.value) }
+            ),
+            playerLapAbilityUsage: Dictionary(
+                uniqueKeysWithValues: playerLapAbilityUsage.map { ($0.key.uuidString, $0.value) }
             )
         )
 
@@ -2996,6 +3110,7 @@ struct GameInProgressView: View {
 
     @discardableResult
     private func registerStartFieldVisit(for player: PlayerCharacter) -> Bool {
+        LapAbilityUsageEngine.resetLap(for: player.id, usage: &playerLapAbilityUsage)
         let result = PowerPathEngine.recordStartFieldVisit(
             playerID: player.id,
             progress: &playerPowerPathProgress,
@@ -3079,13 +3194,15 @@ struct GameInProgressView: View {
 
     private func processPowerPathTurnStart(for playerID: UUID) {
         guard var stats = playerStats[playerID] else { return }
-        if let message = PowerPathEngine.processTurnStart(
+        if let result = PowerPathEngine.processTurnStart(
             playerID: playerID,
-            progress: &playerPowerPathProgress,
-            stats: &stats
+            progress: &playerPowerPathProgress
         ) {
+            if result.coinBonus > 0 {
+                _ = applyCursedCoinGain(result.coinBonus, to: playerID, stats: &stats)
+            }
             setPlayerStats(stats, for: playerID)
-            if let player = players.first(where: { $0.id == playerID }) {
+            if let message = result.message, let player = players.first(where: { $0.id == playerID }) {
                 turnState.logCustomEvent(playerName: player.className, message: message)
             }
         }
@@ -3105,21 +3222,12 @@ struct GameInProgressView: View {
     }
 
     private func applyStartFieldPassCoins(for playerID: UUID, stats: inout PlayerRuntimeStats) {
-        var reward = StartFieldRewards.passCoins
-        let (adjusted, curseMessage) = PowerPathEngine.applyRewardMultiplier(
-            playerID: playerID,
-            baseCoins: reward,
-            progress: &playerPowerPathProgress
-        )
-        reward = adjusted
-        stats.finances += reward
-        if let curseMessage, let player = players.first(where: { $0.id == playerID }) {
-            turnState.logCustomEvent(playerName: player.className, message: curseMessage)
-        }
+        _ = applyCursedCoinGain(StartFieldRewards.passCoins, to: playerID, stats: &stats)
     }
 
     private func offerPostFightHealingIfNeeded(for playerID: UUID) {
         guard playerPowerPathProgress[playerID]?.hasUnlocked(.healing) == true else { return }
+        guard !LapAbilityUsageEngine.hasUsedPowerPath(.healing, playerID: playerID, in: playerLapAbilityUsage) else { return }
         guard let health = playerStats[playerID]?.health, health < 100 else { return }
         pendingHealingPlayerID = playerID
         showHealingOfferAlert = true
@@ -3128,12 +3236,17 @@ struct GameInProgressView: View {
     private func acceptPostFightHealing() {
         guard let playerID = pendingHealingPlayerID else { return }
         guard var stats = playerStats[playerID] else { return }
+        guard !LapAbilityUsageEngine.hasUsedPowerPath(.healing, playerID: playerID, in: playerLapAbilityUsage) else {
+            pendingHealingPlayerID = nil
+            return
+        }
         if let message = PowerPathEngine.offerPostFightHealing(
             playerID: playerID,
             progress: playerPowerPathProgress,
             stats: &stats,
             accept: true
         ) {
+            _ = LapAbilityUsageEngine.markUsedPowerPath(.healing, playerID: playerID, usage: &playerLapAbilityUsage)
             setPlayerStats(stats, for: playerID)
             if let player = players.first(where: { $0.id == playerID }) {
                 turnState.logCustomEvent(playerName: player.className, message: message)
@@ -3153,7 +3266,7 @@ struct GameInProgressView: View {
 
         if stats.health >= StartFieldRewards.maxHealth {
             let financesBefore = stats.finances
-            stats.applyStartFieldStayFullHealthBonus()
+            _ = applyCursedCoinGain(StartFieldRewards.stayAtFullHealthCoins, to: activePlayer.id, stats: &stats)
             setPlayerStats(stats, for: activePlayer.id)
             let financesAfter = playerStats[activePlayer.id]?.finances ?? stats.finances
             let xpGained = PowerPathEngine.grantExperience(
@@ -3233,41 +3346,8 @@ struct GameInProgressView: View {
         settings.playTapSound()
 
         switch result {
-        case .powerPathSkill(let skill):
-            guard let activePlayer else { return }
-            if let message = PowerPathEngine.registerDarkQRActivation(
-                playerID: activePlayer.id,
-                skill: skill,
-                progress: &playerPowerPathProgress
-            ) {
-                turnState.logCustomEvent(
-                    playerName: activePlayer.className,
-                    message: message,
-                    turnMessage: "Ścieżka Mocy — \(skill.title)."
-                )
-            }
-            if skill == .darkAura {
-                let financesBefore = playerStats.mapValues(\.finances)
-                if let theftMessage = PowerPathEngine.tryDarkAuraTheft(
-                    actorID: activePlayer.id,
-                    players: players,
-                    positions: playerBoardPositions,
-                    stats: &playerStats,
-                    progress: &playerPowerPathProgress
-                ) {
-                    if shouldAnimateFinancesChangesAutomatically {
-                        for (playerID, afterStats) in playerStats {
-                            guard let before = financesBefore[playerID] else { continue }
-                            let delta = afterStats.finances - before
-                            queueFinancesChangeAnimation(delta: delta)
-                        }
-                    }
-                    turnState.logCustomEvent(
-                        playerName: activePlayer.className,
-                        message: theftMessage
-                    )
-                }
-            }
+        case .powerPathSkill:
+            openYourSkillsOverlay()
         case .masterAction(let action):
             switch action {
             case .skipTurn:
@@ -3282,6 +3362,8 @@ struct GameInProgressView: View {
                 } else {
                     showPlayerItemsOverlay = true
                 }
+            case .showAbilities:
+                openYourSkillsOverlay()
             }
         case .gameEvent(let event):
             if isGameEventOverlayActive(event) {
@@ -3451,6 +3533,8 @@ struct GameInProgressView: View {
         case .abilitiesExit:
             settings.playTapSound()
             showSessionAbilitiesOverlay = false
+            showYourSkillsOverlay = false
+            syncGameplayQRScanningState()
             trikiCoordinator.statusMessage = "Wciśnięto: Wyjdź."
         case .finishCampaign:
             settings.playTapSound()
@@ -3463,15 +3547,29 @@ struct GameInProgressView: View {
         }
     }
 
+    private func openYourSkillsOverlay() {
+        guard activePlayer != nil else { return }
+        showYourSkillsOverlay = true
+        syncGameplayQRScanningState()
+        if let activePlayer {
+            turnState.logCustomEvent(
+                playerName: activePlayer.className,
+                message: "Otwarto: Twoje Umiejętności.",
+                turnMessage: "Twoje Umiejętności — wybierz umiejętność (raz na okrążenie)."
+            )
+        }
+    }
+
     private func triggerTrikiStealAbility() {
         guard let activePlayer else { return }
         let financesBefore = playerStats.mapValues(\.finances)
-        if let theftMessage = PowerPathEngine.tryDarkAuraTheft(
+        if let result = PowerPathEngine.tryDarkAuraTheft(
             actorID: activePlayer.id,
             players: players,
             positions: playerBoardPositions,
             stats: &playerStats,
-            progress: &playerPowerPathProgress
+            progress: &playerPowerPathProgress,
+            lapUsage: &playerLapAbilityUsage
         ) {
             if shouldAnimateFinancesChangesAutomatically {
                 for (playerID, afterStats) in playerStats {
@@ -3480,8 +3578,8 @@ struct GameInProgressView: View {
                     queueFinancesChangeAnimation(delta: delta)
                 }
             }
-            turnState.logCustomEvent(playerName: activePlayer.className, message: theftMessage)
-            trikiCoordinator.statusMessage = theftMessage
+            turnState.logCustomEvent(playerName: activePlayer.className, message: result.message)
+            trikiCoordinator.statusMessage = result.message
         } else {
             trikiCoordinator.statusMessage = "Nie można użyć okradania w tym momencie."
         }
@@ -3885,8 +3983,8 @@ struct GameInProgressView: View {
         guard owned.contains(item.id) else { return }
 
         let sellPrice = effectiveItemValue(item, for: activePlayer.id)
-        stats.finances += sellPrice
-        updatePlayerFinances(stats.finances, for: activePlayer.id)
+        _ = applyCursedCoinGain(sellPrice, to: activePlayer.id, stats: &stats)
+        setPlayerStats(stats, for: activePlayer.id, financesAnimation: .automatic)
         owned.removeAll { $0 == item.id }
         playerGrantedItemIDs[activePlayer.id] = owned
         unequipIfNeeded(itemID: item.id, for: activePlayer.id)
@@ -3938,6 +4036,7 @@ struct GameInProgressView: View {
 
         let playerID = session.player.id
         guard var stats = playerStats[playerID] else { return }
+        let financesBefore = stats.finances
 
         var abilityIDs = playerGrantedAbilityIDs[playerID] ?? []
         let previousItemIDs = playerGrantedItemIDs[playerID] ?? []
@@ -3951,6 +4050,7 @@ struct GameInProgressView: View {
             itemIDs: &itemIDs,
             queueBlockRounds: &queueBlock
         )
+        reconcileCoinGainWithCurse(playerID: playerID, beforeFinances: financesBefore, stats: &stats)
 
         setPlayerStats(stats, for: playerID, financesAnimation: .suppressed)
         guard players.contains(where: { $0.id == playerID }) else {
@@ -4032,6 +4132,7 @@ struct GameInProgressView: View {
 
         let playerID = session.player.id
         guard var stats = playerStats[playerID] else { return }
+        let financesBefore = stats.finances
 
         if PowerPathEngine.shouldIgnoreNegativeSpecialCard(
             playerID: playerID,
@@ -4073,6 +4174,7 @@ struct GameInProgressView: View {
                 grantGameplayAbility(to: session.player, abilityIDs: &ids)
             }
         )
+        reconcileCoinGainWithCurse(playerID: playerID, beforeFinances: financesBefore, stats: &stats)
 
         setPlayerStats(stats, for: playerID, financesAnimation: .suppressed)
         guard players.contains(where: { $0.id == playerID }) else {
@@ -4297,6 +4399,9 @@ struct GameInProgressView: View {
             || isShopOverlayVisible
             || isXpShopOverlayVisible
             || isPowerPathOverlayVisible
+            || showSessionAbilitiesOverlay
+            || showYourSkillsOverlay
+            || powerPathSkillUsePresentation != nil
             || showFinalTurnIntro
 
         canScanGameplayQR = !blocked && activePlayer != nil
@@ -4584,6 +4689,94 @@ struct GameInProgressView: View {
         case .arenaPvP:
             return showArenaPvPAR || isArenaPvPActive
         }
+    }
+
+    private func presentPowerPathSkillUse(_ skill: PowerPathSkillID, playerID: UUID) {
+        guard let caster = players.first(where: { $0.id == playerID }) else { return }
+        guard playerPowerPathProgress[playerID]?.hasUnlocked(skill) == true else { return }
+        guard skill.isActivatablePerLap else { return }
+        guard !LapAbilityUsageEngine.hasUsedPowerPath(skill, playerID: playerID, in: playerLapAbilityUsage) else { return }
+
+        switch skill {
+        case .darkAura:
+            let financesBefore = playerStats.mapValues(\.finances)
+            if let result = PowerPathEngine.tryDarkAuraTheft(
+                actorID: playerID,
+                players: players,
+                positions: playerBoardPositions,
+                stats: &playerStats,
+                progress: &playerPowerPathProgress,
+                lapUsage: &playerLapAbilityUsage
+            ) {
+                if shouldAnimateFinancesChangesAutomatically {
+                    for (id, afterStats) in playerStats {
+                        guard let before = financesBefore[id] else { continue }
+                        queueFinancesChangeAnimation(delta: afterStats.finances - before)
+                    }
+                }
+                turnState.logCustomEvent(playerName: caster.className, message: result.message)
+                let victim = players.first(where: { $0.id == result.victimID })
+                powerPathSkillUsePresentation = PowerPathSkillUsePresentation(
+                    skill: skill,
+                    casterName: caster.displayTitle,
+                    targetPlayer: victim,
+                    targetGlow: glowColor(for: victim),
+                    targetInstruction: "Straciłeś monety!",
+                    effectDetail: result.message
+                )
+            } else {
+                powerPathSkillUsePresentation = PowerPathSkillUsePresentation(
+                    skill: skill,
+                    casterName: caster.displayTitle,
+                    targetPlayer: caster,
+                    targetGlow: turnGlowColor,
+                    targetInstruction: "Brak skutku",
+                    effectDetail: "Mroczna Aura: brak celu na tym polu lub niepowodzenie."
+                )
+            }
+
+        case .healing:
+            guard var stats = playerStats[playerID], stats.health < 100 else { return }
+            guard let message = PowerPathEngine.offerPostFightHealing(
+                playerID: playerID,
+                progress: playerPowerPathProgress,
+                stats: &stats,
+                accept: true
+            ) else { return }
+            _ = LapAbilityUsageEngine.markUsedPowerPath(.healing, playerID: playerID, usage: &playerLapAbilityUsage)
+            setPlayerStats(stats, for: playerID)
+            turnState.logCustomEvent(playerName: caster.className, message: message)
+            powerPathSkillUsePresentation = PowerPathSkillUsePresentation(
+                skill: skill,
+                casterName: caster.displayTitle,
+                targetPlayer: caster,
+                targetGlow: turnGlowColor,
+                targetInstruction: "Pełne zdrowie!",
+                effectDetail: message
+            )
+
+        case .curse, .shadow, .benevolent, .protection:
+            break
+        }
+    }
+
+    private func presentPowerPathCurseUse(casterID: UUID, targetID: UUID) {
+        guard let caster = players.first(where: { $0.id == casterID }) else { return }
+        guard let target = players.first(where: { $0.id == targetID }) else { return }
+        guard playerPowerPathProgress[casterID]?.hasUnlocked(.curse) == true else { return }
+        guard !LapAbilityUsageEngine.hasUsedPowerPath(.curse, playerID: casterID, in: playerLapAbilityUsage) else { return }
+        guard let message = applyPowerPathCurse(casterID: casterID, targetID: targetID) else { return }
+
+        _ = LapAbilityUsageEngine.markUsedPowerPath(.curse, playerID: casterID, usage: &playerLapAbilityUsage)
+        turnState.logCustomEvent(playerName: caster.className, message: message)
+        powerPathSkillUsePresentation = PowerPathSkillUsePresentation(
+            skill: .curse,
+            casterName: caster.displayTitle,
+            targetPlayer: target,
+            targetGlow: glowColor(for: target),
+            targetInstruction: "Klątwa nałożona!",
+            effectDetail: "Twoja następna nagroda monet będzie o połowę mniejsza."
+        )
     }
 
     private func confirmSessionAbilityUse(

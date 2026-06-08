@@ -90,7 +90,7 @@ enum PowerPathSkillID: String, Codable, CaseIterable, Identifiable {
     var summary: String {
         switch self {
         case .darkAura:
-            "Na tym samym polu co inny gracz: 40% szans na zabranie 10–30% jego monet (max raz na 3 tury)."
+            "Masz 40% szans na okradnięcie gracza który jest na tym samym polu co ty. Możliwe jest okradnięcie losowo od 10-30% funduszy gracza."
         case .curse:
             "Następna nagroda wybranego przeciwnika jest o połowę mniejsza."
         case .shadow:
@@ -358,9 +358,8 @@ enum PowerPathEngine {
 
     static func processTurnStart(
         playerID: UUID,
-        progress: inout [UUID: PlayerPowerPathProgress],
-        stats: inout PlayerRuntimeStats
-    ) -> String? {
+        progress: inout [UUID: PlayerPowerPathProgress]
+    ) -> (message: String?, coinBonus: Int)? {
         var playerProgress = progress[playerID] ?? PlayerPowerPathProgress()
         playerProgress.benevolentTriggeredThisTurn = false
         defer { progress[playerID] = playerProgress }
@@ -369,8 +368,7 @@ enum PowerPathEngine {
         guard Double.random(in: 0..<1) < 0.30 else { return nil }
 
         playerProgress.benevolentTriggeredThisTurn = true
-        stats.finances += 100
-        return "Dobroduszny: +100 monet (szczęście w tej turze)."
+        return (message: "Dobroduszny: +100 monet (szczęście w tej turze).", coinBonus: 100)
     }
 
     static func robberySuccessChance(
@@ -393,17 +391,34 @@ enum PowerPathEngine {
         return progress[playerID]?.hasUnlocked(.protection) == true
     }
 
+    static func isPlayerCursedForNextCoinReward(
+        playerID: UUID,
+        progress: [UUID: PlayerPowerPathProgress]
+    ) -> Bool {
+        progress.values.contains { $0.cursedPlayerIDs.contains(playerID) }
+    }
+
+    static func clearCurseForNextCoinReward(
+        playerID: UUID,
+        progress: inout [UUID: PlayerPowerPathProgress]
+    ) {
+        for id in progress.keys {
+            var playerProgress = progress[id] ?? PlayerPowerPathProgress()
+            playerProgress.cursedPlayerIDs.remove(playerID)
+            progress[id] = playerProgress
+        }
+    }
+
     static func applyRewardMultiplier(
         playerID: UUID,
         baseCoins: Int,
         progress: inout [UUID: PlayerPowerPathProgress]
     ) -> (coins: Int, message: String?) {
-        var playerProgress = progress[playerID] ?? PlayerPowerPathProgress()
-        guard playerProgress.cursedPlayerIDs.contains(playerID) else {
+        guard baseCoins > 0 else { return (baseCoins, nil) }
+        guard isPlayerCursedForNextCoinReward(playerID: playerID, progress: progress) else {
             return (baseCoins, nil)
         }
-        playerProgress.cursedPlayerIDs.remove(playerID)
-        progress[playerID] = playerProgress
+        clearCurseForNextCoinReward(playerID: playerID, progress: &progress)
         return (max(0, baseCoins / 2), "Klątwa: nagroda o połowę mniejsza.")
     }
 
@@ -434,16 +449,24 @@ enum PowerPathEngine {
         }
     }
 
+    struct DarkAuraTheftResult: Equatable {
+        let message: String
+        let victimID: UUID
+    }
+
     static func tryDarkAuraTheft(
         actorID: UUID,
         players: [PlayerCharacter],
         positions: [UUID: Int],
         stats: inout [UUID: PlayerRuntimeStats],
-        progress: inout [UUID: PlayerPowerPathProgress]
-    ) -> String? {
+        progress: inout [UUID: PlayerPowerPathProgress],
+        lapUsage: inout [UUID: PlayerLapAbilityUsage]
+    ) -> DarkAuraTheftResult? {
         var actorProgress = progress[actorID] ?? PlayerPowerPathProgress()
         guard actorProgress.hasUnlocked(.darkAura) else { return nil }
-        guard actorProgress.turnsSinceDarkAuraUse >= 3 else { return nil }
+        guard !LapAbilityUsageEngine.hasUsedPowerPath(.darkAura, playerID: actorID, in: lapUsage) else {
+            return nil
+        }
 
         guard let actorPosition = positions[actorID] else { return nil }
         let victims = players.filter {
@@ -461,10 +484,13 @@ enum PowerPathEngine {
         stats[victim.id] = victimStats
         stats[actorID] = actorStats
 
-        actorProgress.turnsSinceDarkAuraUse = 0
+        _ = LapAbilityUsageEngine.markUsedPowerPath(.darkAura, playerID: actorID, usage: &lapUsage)
         progress[actorID] = actorProgress
 
-        return "Mroczna Aura: zabrano \(stolen) monet od \(victim.displayTitle)."
+        return DarkAuraTheftResult(
+            message: "Mroczna Aura: zabrano \(stolen) monet od \(victim.displayTitle).",
+            victimID: victim.id
+        )
     }
 
     static func applyShadowAfterHealthLoss(

@@ -5,10 +5,11 @@
 
 import Foundation
 
-/// Kody szybkich akcji w rozgrywce (9001–9002).
+/// Kody szybkich akcji w rozgrywce (9001–9003).
 enum QRMasterActionCode: String, CaseIterable, Identifiable {
     case skipTurn = "9001"
     case showItems = "9002"
+    case showAbilities = "9003"
 
     var id: String { rawValue }
 
@@ -16,6 +17,7 @@ enum QRMasterActionCode: String, CaseIterable, Identifiable {
         switch self {
         case .skipTurn: "Pomiń turę"
         case .showItems: "Pokaż przedmioty"
+        case .showAbilities: "Twoje Umiejętności"
         }
     }
 
@@ -31,6 +33,8 @@ enum QRMasterActionCode: String, CaseIterable, Identifiable {
             return .skipTurn
         case "9002", "PRZEDMIOTY", "PREDMIOTY", "SHOWITEMS", "ITEMS", "POKAZPRZEDMIOTY":
             return .showItems
+        case "9003", "ZDOLNOSCI", "TWOJEZDOLNOSCI", "ABILITIES", "SHOWABILITIES", "SKILLS":
+            return .showAbilities
         default:
             break
         }
@@ -38,6 +42,7 @@ enum QRMasterActionCode: String, CaseIterable, Identifiable {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
         if trimmed == "DMD://9001" || trimmed == "DMD:9001" { return .skipTurn }
         if trimmed == "DMD://9002" || trimmed == "DMD:9002" { return .showItems }
+        if trimmed == "DMD://9003" || trimmed == "DMD:9003" { return .showAbilities }
         return nil
     }
 }
